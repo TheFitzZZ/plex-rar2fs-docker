@@ -42,20 +42,28 @@ ARG DEBIAN_FRONTEND=noninteractive
 # and matches where Plex's libva looks (paired with the env vars below).
 # ----------------------------------------------------------------------------
 COPY --from=dri-source /usr/lib/dri/iHD_drv_video.so   /usr/lib/plexmediaserver/lib/dri/
-COPY --from=dri-source /usr/lib/libigdgmm.so.12        /usr/lib/plexmediaserver/lib/
 COPY --from=dri-source /usr/lib/libigdgmm.so.12.10.0   /usr/lib/plexmediaserver/lib/
-COPY --from=dri-source /usr/lib/libstdc++.so.6         /usr/lib/plexmediaserver/lib/
 COPY --from=dri-source /usr/lib/libstdc++.so.6.0.34    /usr/lib/plexmediaserver/lib/
 COPY --from=dri-source /usr/lib/libgcc_s.so.1          /usr/lib/plexmediaserver/lib/
 
-# Create the libc.musl-x86_64.so.1 alias that Alpine ships as a symlink to
-# the musl loader. The Alpine-built iHD driver has DT_NEEDED=libc.musl-x86_64.so.1
-# (Alpine's dynamic linker name for libc), but Plex's bundle only ships
-# ld-musl-x86_64.so.1 — same binary, different name. Without this symlink the
-# driver dlopen()s, then the first libc call from inside the driver hits a
-# NULL function pointer and segfaults at 0x4310. Verified on Unraid (UHD 770,
-# 2026-06-09) post-PR #3: ldd showed libc.musl-x86_64.so.1 => not found.
-RUN ln -sf ld-musl-x86_64.so.1 /usr/lib/plexmediaserver/lib/libc.musl-x86_64.so.1
+# Recreate the SONAME symlinks for the versioned libs (libigdgmm.so.12 → .12.10.0,
+# libstdc++.so.6 → .6.0.34) AND add the libc.musl-x86_64.so.1 alias to ld-musl.
+#
+# IMPORTANT: do NOT `COPY` the symlink-named files directly from the Alpine
+# stage — `docker COPY` dereferences symlinks and copies the TARGET as a
+# regular file. The result is two independent ELF files with the same content
+# but different inodes, so `patchelf` only patches one (the .X.Y.Z one) and
+# the loader uses the SONAME-named copy (the .X one, unpatched, no RPATH) →
+# transitive deps fall back to system glibc → segfault. Verified the hard way
+# 2026-06-09 in PR #5.
+#
+# The libc.musl alias matches Alpine's own layout (libc.musl-x86_64.so.1 is
+# always a symlink to ld-musl-x86_64.so.1 on musl systems).
+RUN set -eux; \
+    cd /usr/lib/plexmediaserver/lib; \
+    ln -sf libigdgmm.so.12.10.0 libigdgmm.so.12; \
+    ln -sf libstdc++.so.6.0.34  libstdc++.so.6; \
+    ln -sf ld-musl-x86_64.so.1  libc.musl-x86_64.so.1
 
 # Tell libva where to find the driver and which driver to load.
 # Without these, libva uses its compile-time default path (a non-existent
