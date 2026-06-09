@@ -1,8 +1,64 @@
 # Docker container for the official Plex Media Server with added transparent rar support (rar2fs by hasse69)
 
-This container is based in large parts on disaster37/docker-plex. The goal is to have this container work just as the standard pms-docker with an additional /data-unrar folder where rar2fs does its magic.
+This container is based in large parts on disaster37/docker-plex. The goal is to have this container work just as the standard pms-docker with an additional `/data-unrar` folder where rar2fs does its magic.
 
-Probably needs to run priviliged as it uses fuse functions...
+## Build args
+
+| Arg              | Default     | Notes                                                                 |
+|------------------|-------------|-----------------------------------------------------------------------|
+| `RAR2FS_VERSION` | `v1.29.7`   | Git tag from https://github.com/hasse69/rar2fs                        |
+| `UNRAR_VERSION`  | `7.1.10`    | unrarsrc tarball version from https://www.rarlab.com/rar/             |
+
+Override at build time, e.g.:
+
+```
+docker build --build-arg UNRAR_VERSION=7.0.9 -t fitzzz/plex-rar2fs:test .
+```
+
+## Runtime requirements
+
+rar2fs uses FUSE, so the container needs FUSE access. On Unraid the simplest
+working setup is `--privileged`. The minimum non-privileged variant is:
+
+```
+--cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined
+```
+
+## Hardware-accelerated transcoding (Intel iGPU)
+
+This image installs `intel-media-va-driver-non-free` so Plex can use VAAPI
+on Intel iGPUs (UHD 6xx, UHD 7xx, Arc, …). The upstream `plexinc/pms-docker`
+image ships `libva.so.2` but **no driver**, so HW transcoding silently falls
+back to software there. To use HW transcoding here you also need to pass
+the render device into the container:
+
+```
+--device /dev/dri:/dev/dri
+```
+
+…and have a Plex Pass account (HW transcoding is a Plex Pass feature).
+
+Verify it works from inside the running container:
+
+```
+docker exec plex sh -c 'LIBVA_MESSAGING_LEVEL=2 /usr/lib/plexmediaserver/Plex\ Transcoder \
+  -hide_banner -loglevel debug -init_hw_device vaapi=intel:/dev/dri/renderD128 -f null - 2>&1 \
+  | grep -iE "libva|vaapi|driver|fail" | head'
+```
+
+Expect `Initialised VAAPI connection: version 1.21` and a driver line such as
+`VAAPI driver: Intel iHD driver for Intel(R) Gen Graphics`.
+
+## Tags
+
+CI publishes three tags per successful build:
+
+- `:latest` — always points at the newest master build
+- `:sha-<7-char-commit>` — pinnable to a known-good build
+- `:YYYYMMDD` — also pinnable, easier to read
+
+Daily cron rebuilds are skipped when the upstream `plexinc/pms-docker:latest`
+digest is unchanged, so `:latest` stays stable.
 
 # Original readme for plexinc/pms-docker
  
