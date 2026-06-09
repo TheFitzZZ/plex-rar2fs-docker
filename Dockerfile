@@ -48,6 +48,15 @@ COPY --from=dri-source /usr/lib/libstdc++.so.6         /usr/lib/plexmediaserver/
 COPY --from=dri-source /usr/lib/libstdc++.so.6.0.34    /usr/lib/plexmediaserver/lib/
 COPY --from=dri-source /usr/lib/libgcc_s.so.1          /usr/lib/plexmediaserver/lib/
 
+# Create the libc.musl-x86_64.so.1 alias that Alpine ships as a symlink to
+# the musl loader. The Alpine-built iHD driver has DT_NEEDED=libc.musl-x86_64.so.1
+# (Alpine's dynamic linker name for libc), but Plex's bundle only ships
+# ld-musl-x86_64.so.1 — same binary, different name. Without this symlink the
+# driver dlopen()s, then the first libc call from inside the driver hits a
+# NULL function pointer and segfaults at 0x4310. Verified on Unraid (UHD 770,
+# 2026-06-09) post-PR #3: ldd showed libc.musl-x86_64.so.1 => not found.
+RUN ln -sf ld-musl-x86_64.so.1 /usr/lib/plexmediaserver/lib/libc.musl-x86_64.so.1
+
 # Tell libva where to find the driver and which driver to load.
 # Without these, libva uses its compile-time default path (a non-existent
 # /home/runner/_work/... rpath baked into Plex's libva by the Plex CI build).
