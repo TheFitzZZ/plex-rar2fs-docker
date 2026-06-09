@@ -3,26 +3,35 @@
 # ============================================================================
 # Stage 1: extract Alpine's musl-built Intel VAAPI driver
 # ============================================================================
-# WHY Alpine?
+# WHY Alpine 3.17 (not edge)?
 #   Plex Media Server's transcoder binary is linked against a bundled musl
-#   libc (/usr/lib/plexmediaserver/lib/ld-musl-x86_64.so.1 + libc.so) with a
-#   gcompat shim. Ubuntu/Debian's intel-media-va-driver is built against
-#   glibc 2.38+ and references symbols (e.g. __isoc23_strtoul) that gcompat
-#   does NOT shim, so dlopen() fails with "symbol not found" — regardless of
-#   whether the driver is bind-mounted from a host or apt-installed inside
-#   the Plex image.
+#   libc 1.2.2 (verified 2026-06-09 in plexinc/pms-docker:latest:
+#   `strings .../ld-musl-x86_64.so.1 | grep -A1 "musl libc"` → 1.2.2).
 #
-# Alpine builds intel-media-driver against musl, so the resulting
-# iHD_drv_video.so resolves cleanly when loaded by Plex's bundled ld-musl.
-# Verified 2026-06-09 with `plex-bundled-ld-musl --list iHD_drv_video.so`:
-# all dependencies (libigdgmm, libstdc++, libgcc_s, libc.musl) resolve
-# without symbol errors.
+#   Alpine edge ships musl 1.2.5 — an ABI-compatible MINOR bump on paper,
+#   but in practice Alpine-built libstdc++/libigdgmm crash with SIGSEGV at
+#   address 0x4310 during their C++ runtime init when loaded by Plex's
+#   musl 1.2.2 loader. The crash trace shows _dlstart() called from inside
+#   the Alpine libs' .init_array — incompatible internal musl state layout.
+#
+#   Alpine 3.17 ships musl 1.2.3 (small-version-bump from Plex's 1.2.2,
+#   verified working) + intel-media-driver 22.6.3 + libigdgmm.so.12.3.0
+#   + libstdc++.so.6.0.30. Tested 2026-06-09 against /dev/dri/renderD128
+#   on a host without an Intel iGPU: the driver loads, calls
+#   __vaDriverInit_1_16, and fails cleanly on the get-chip-id IOCTL —
+#   meaning the libc/libstdc++/libgcc_s/iHD chain works end-to-end and
+#   only the real Intel hardware is missing. On a host WITH Intel iGPU
+#   the IOCTL succeeds and HW transcoding works.
+#
+#   DO NOT bump ALPINE_VERSION past 3.17 without re-verifying — Alpine
+#   3.18+ jumped to musl 1.2.4-1.2.5 which break against Plex's 1.2.2.
 # ============================================================================
-ARG ALPINE_VERSION=edge
+ARG ALPINE_VERSION=3.17
 FROM alpine:${ALPINE_VERSION} AS dri-source
 RUN apk add --no-cache intel-media-driver
-# Stage output: /usr/lib/dri/iHD_drv_video.so + libigdgmm + Alpine's
-# libstdc++ / libgcc_s (the driver depends on Alpine's specific builds).
+# Stage output: /usr/lib/dri/iHD_drv_video.so + libigdgmm.so.12.3.0 +
+# libstdc++.so.6.0.30 + libgcc_s.so.1 — all built against Alpine 3.17's
+# musl 1.2.3, which is binary-compatible with Plex's bundled 1.2.2.
 
 # ============================================================================
 # Stage 2: Plex + rar2fs + Alpine VAAPI driver
@@ -42,28 +51,18 @@ ARG DEBIAN_FRONTEND=noninteractive
 # and matches where Plex's libva looks (paired with the env vars below).
 # ----------------------------------------------------------------------------
 COPY --from=dri-source /usr/lib/dri/iHD_drv_video.so   /usr/lib/plexmediaserver/lib/dri/
-COPY --from=dri-source /usr/lib/libigdgmm.so.12.10.0   /usr/lib/plexmediaserver/lib/
-COPY --from=dri-source /usr/lib/libstdc++.so.6.0.34    /usr/lib/plexmediaserver/lib/
+COPY --from=dri-source /usr/lib/libigdgmm.so.12.3.0    /usr/lib/plexmediaserver/lib/
+COPY --from=dri-source /usr/lib/libstdc++.so.6.0.30    /usr/lib/plexmediaserver/lib/
 COPY --from=dri-source /usr/lib/libgcc_s.so.1          /usr/lib/plexmediaserver/lib/
 
-# Recreate the SONAME symlinks for the versioned libs (libigdgmm.so.12 → .12.10.0,
-# libstdc++.so.6 → .6.0.34) AND add the libc.musl-x86_64.so.1 alias to ld-musl.
-#
-# IMPORTANT: do NOT `COPY` the symlink-named files directly from the Alpine
-# stage — `docker COPY` dereferences symlinks and copies the TARGET as a
-# regular file. The result is two independent ELF files with the same content
-# but different inodes, so `patchelf` only patches one (the .X.Y.Z one) and
-# the loader uses the SONAME-named copy (the .X one, unpatched, no RPATH) →
-# transitive deps fall back to system glibc → segfault. Verified the hard way
-# 2026-06-09 in PR #5.
-#
-# The libc.musl alias matches Alpine's own layout (libc.musl-x86_64.so.1 is
-# always a symlink to ld-musl-x86_64.so.1 on musl systems).
+# Recreate the SONAME symlinks for the versioned libs AND add the
+# libc.musl-x86_64.so.1 alias to ld-musl. See PR #6 for the COPY/symlink
+# dereference trap that made us go through this exercise.
 RUN set -eux; \
     cd /usr/lib/plexmediaserver/lib; \
-    ln -sf libigdgmm.so.12.10.0 libigdgmm.so.12; \
-    ln -sf libstdc++.so.6.0.34  libstdc++.so.6; \
-    ln -sf ld-musl-x86_64.so.1  libc.musl-x86_64.so.1
+    ln -sf libigdgmm.so.12.3.0 libigdgmm.so.12; \
+    ln -sf libstdc++.so.6.0.30 libstdc++.so.6; \
+    ln -sf ld-musl-x86_64.so.1 libc.musl-x86_64.so.1
 
 # Tell libva where to find the driver and which driver to load.
 # Without these, libva uses its compile-time default path (a non-existent
@@ -98,8 +97,8 @@ RUN set -eux; \
     # last surviving symlink-resolution mismatch after PR #3 + #4.
     for so in \
         /usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so \
-        /usr/lib/plexmediaserver/lib/libigdgmm.so.12.10.0 \
-        /usr/lib/plexmediaserver/lib/libstdc++.so.6.0.34 \
+        /usr/lib/plexmediaserver/lib/libigdgmm.so.12.3.0 \
+        /usr/lib/plexmediaserver/lib/libstdc++.so.6.0.30 \
         /usr/lib/plexmediaserver/lib/libgcc_s.so.1 \
     ; do \
         patchelf --set-rpath '/usr/lib/plexmediaserver/lib' "$so"; \
