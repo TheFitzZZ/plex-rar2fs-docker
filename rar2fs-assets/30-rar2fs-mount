@@ -1,29 +1,35 @@
 #!/usr/bin/with-contenv bash
+#
+# s6-overlay v2 cont-init.d hook
+# Mounts /data (host bind, possibly containing .rar archives) onto
+# /data-unrar so Plex can read RAR contents transparently as if they were
+# regular files. rar2fs uses FUSE; the container must run with
+# --cap-add SYS_ADMIN --device /dev/fuse and either --security-opt apparmor=unconfined
+# OR be --privileged (typical on Unraid).
+#
+
+set -eu
 
 # If we are debugging, enable trace
-if [ "${DEBUG,,}" = "true" ]; then
+if [ "${DEBUG:-}" = "true" ] || [ "${DEBUG:-}" = "TRUE" ]; then
   set -x
 fi
 
-function getPref {
-  local key="$1"
-  
-  xmlstarlet sel -T -t -m "/Preferences" -v "@${key}" -n "${prefFile}"
-}
+# Bail early if /data is empty — rar2fs would mount an empty FS and
+# all media would look "missing" inside Plex.
+if [ -z "$(ls -A /data 2>/dev/null || true)" ]; then
+  echo "[rar2fs] WARNING: /data is empty or not mounted — skipping rar2fs mount" >&2
+  exit 0
+fi
 
-function setPref {
-  local key="$1"
-  local value="$2"
-  
-  count="$(xmlstarlet sel -t -v "count(/Preferences/@${key})" "${prefFile}")"
-  count=$(($count + 0))
-  if [[ $count > 0 ]]; then
-    xmlstarlet ed --inplace --update "/Preferences/@${key}" -v "${value}" "${prefFile}"
-  else
-    xmlstarlet ed --inplace --insert "/Preferences"  --type attr -n "${key}" -v "${value}" "${prefFile}"
-  fi
-}
+# If /data-unrar is already a mountpoint (e.g. container restart without
+# proper teardown), skip the mount to avoid stacking FUSE layers.
+if mountpoint -q /data-unrar 2>/dev/null; then
+  echo "[rar2fs] /data-unrar already mounted — skipping" >&2
+  exit 0
+fi
 
+echo "[rar2fs] mounting /data -> /data-unrar (seek-length=1, allow_other)"
 rar2fs --seek-length=1 -o allow_other /data /data-unrar
 
-echo "Rar2fs setup complete - Mounted data drive"
+echo "[rar2fs] mount complete"
