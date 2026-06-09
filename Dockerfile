@@ -74,17 +74,29 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends $BUILD_DEPS $RUNTIME_DEPS; \
     \
-    # --- Patch driver RPATH so its dlopen()'d deps resolve to Plex's lib dir ---
+    # --- Patch driver + transitive dep RPATHs so they resolve to Plex's lib dir ---
     # The Alpine-built iHD_drv_video.so depends on libigdgmm.so.12, libstdc++.so.6,
     # libgcc_s.so.1 — but Plex's transcoder process-wide dynamic linker does NOT
     # search /usr/lib/plexmediaserver/lib/ by default. Without RPATH the driver
     # loads, then segfaults at 0x4310 (NULL function pointer call) when it tries
-    # to call a libigdgmm function whose .so wasn't resolved. Verified 2026-06-09
-    # on Unraid host (UHD 770): RPATH-less driver triggers "libva: Trying to
-    # open .../iHD_drv_video.so" immediately followed by SIGSEGV.
-    patchelf --set-rpath '/usr/lib/plexmediaserver/lib' \
-        /usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so; \
-    patchelf --print-rpath /usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so; \
+    # to call a libigdgmm function whose .so wasn't resolved.
+    #
+    # IMPORTANT: it's not enough to patch only the driver — libigdgmm.so.12 itself
+    # ALSO has DT_NEEDED entries for libstdc++.so.6 / libgcc_s.so.1 / libc.musl
+    # and without its own RPATH it picks the GLIBC versions from /usr/lib/x86_64-
+    # linux-gnu/, which the musl-built driver+libigdgmm cannot interop with →
+    # same 0x4310 segfault. Patch EVERY Alpine .so we copied in.
+    # Verified 2026-06-09 on Unraid (UHD 770) — libigdgmm without RPATH was the
+    # last surviving symlink-resolution mismatch after PR #3 + #4.
+    for so in \
+        /usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so \
+        /usr/lib/plexmediaserver/lib/libigdgmm.so.12.10.0 \
+        /usr/lib/plexmediaserver/lib/libstdc++.so.6.0.34 \
+        /usr/lib/plexmediaserver/lib/libgcc_s.so.1 \
+    ; do \
+        patchelf --set-rpath '/usr/lib/plexmediaserver/lib' "$so"; \
+        echo "RPATH on $so: $(patchelf --print-rpath "$so")"; \
+    done; \
     \
     # --- Build rar2fs ---
     cd /tmp; \
