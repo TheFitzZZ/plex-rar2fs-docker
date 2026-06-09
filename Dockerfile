@@ -55,15 +55,27 @@ ENV LIBVA_DRIVERS_PATH=/usr/lib/plexmediaserver/lib/dri \
     LIBVA_DRIVER_NAME=iHD
 
 # ----------------------------------------------------------------------------
-# Single RUN layer: build deps -> build rar2fs -> cleanup.
+# Single RUN layer: build deps -> patch driver RPATH -> build rar2fs -> cleanup.
 # Build deps live and die in the same layer so they aren't cached in a
 # lower layer (which would bloat the final image even after `apt remove`).
 # ----------------------------------------------------------------------------
 RUN set -eux; \
-    BUILD_DEPS="libfuse-dev autoconf automake autopoint build-essential git wget ca-certificates"; \
+    BUILD_DEPS="libfuse-dev autoconf automake autopoint build-essential git wget ca-certificates patchelf"; \
     RUNTIME_DEPS="fuse libfuse2t64"; \
     apt-get update; \
     apt-get install -y --no-install-recommends $BUILD_DEPS $RUNTIME_DEPS; \
+    \
+    # --- Patch driver RPATH so its dlopen()'d deps resolve to Plex's lib dir ---
+    # The Alpine-built iHD_drv_video.so depends on libigdgmm.so.12, libstdc++.so.6,
+    # libgcc_s.so.1 — but Plex's transcoder process-wide dynamic linker does NOT
+    # search /usr/lib/plexmediaserver/lib/ by default. Without RPATH the driver
+    # loads, then segfaults at 0x4310 (NULL function pointer call) when it tries
+    # to call a libigdgmm function whose .so wasn't resolved. Verified 2026-06-09
+    # on Unraid host (UHD 770): RPATH-less driver triggers "libva: Trying to
+    # open .../iHD_drv_video.so" immediately followed by SIGSEGV.
+    patchelf --set-rpath '/usr/lib/plexmediaserver/lib' \
+        /usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so; \
+    patchelf --print-rpath /usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so; \
     \
     # --- Build rar2fs ---
     cd /tmp; \
