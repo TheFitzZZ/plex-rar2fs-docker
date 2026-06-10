@@ -94,7 +94,7 @@ For troubleshooting (driver load issues, Plex' runtime DriverDL pipeline, musl/g
 
 This repository is maintained by [@TheFitzZZ](https://github.com/TheFitzZZ). PRs are welcome — please run a local build (`docker build .`) and, for VAAPI-related changes, attach a successful transcode log line (`ps` output showing `h264_vaapi` / `hevc_vaapi`) from a real Intel iGPU host.
 
-**Agentic AI disclosure:** routine maintenance of this repository (Dockerfile updates, dependency bumps, VAAPI debugging, README edits, CI tweaks) is performed with the assistance of LLM coding agents under human review and approval. Every commit is reviewed and tested before merge; every Docker image push goes through CI. If you spot an issue, please open one — it's actually being read by a person.
+**Agentic AI disclosure:** routine maintenance of this repository (Dockerfile updates, dependency bumps, VAAPI debugging, README edits, CI tweaks) is performed with the assistance of LLM coding agents under human review and approval. Every commit is reviewed and tested before merge; every Docker image push goes through CI. If you spot an issue, please open one — it's actually being read by a person, even if you see em-dashes ;-).
 
 ---
 
