@@ -1,0 +1,144 @@
+#!/usr/bin/with-contenv bash
+#
+# s6-overlay v2 cont-init.d hook
+#
+# Repairs Plex' DriverDL-managed VAAPI cache when it points to a dangling
+# or missing iHD_drv_video.so file inside /config/.../Drivers/imd-<hash>/dri/.
+#
+# WHY THIS EXISTS
+# ---------------
+# Plex Server (>= 1.43.x) ships a runtime "DriverDL" pipeline that downloads
+# its own iHD driver into /config/.../Drivers/imd-<hash>-linux-x86_64/dri/
+# and points the Transcoder subprocess at that path via an injected
+# LIBVA_DRIVERS_PATH env override. This silently bypasses any
+# LIBVA_DRIVERS_PATH=/usr/lib/plexmediaserver/lib/dri set on the container.
+#
+# That cache is fragile in two specific failure modes:
+#
+# 1) The cache file is deleted manually (e.g. an operator following an
+#    outdated cleanup recipe). Plex does NOT re-download on missing-file —
+#    the imd-<hash> dir's mere existence convinces Plex the driver is
+#    already prepared. Every HW-transcode session then dies with
+#    "Failed to set value 'vaapi=...' for option 'init_hw_device': I/O error"
+#    until the file is restored.
+#
+# 2) After our image installs a known-good musl-clean iHD driver at
+#    /usr/lib/plexmediaserver/lib/dri/, an existing Plex install may STILL
+#    have a stale DriverDL cache pointing at an older / unrelated /
+#    glibc-only iHD file that won't load against our bundled libigdgmm.
+#
+# WHAT THIS HOOK DOES
+# -------------------
+# At each container start, if the DriverDL cache symlink exists but points
+# to a missing file, OR the target dir exists but is empty / contains an
+# obviously-broken file, we copy our bundled iHD driver into the expected
+# cache location. This restores Plex' "I already have this driver" state
+# with a driver that's guaranteed to load against our bundled libigdgmm
+# (gmmlib 22.10.0 with the GmmGetAIL symbol Plex' downloaded driver
+# requires).
+#
+# WHAT THIS HOOK DOES *NOT* DO
+# ----------------------------
+# - Does NOT touch a healthy cache (file exists, size > 0). Plex's own
+#   downloaded driver is allowed to be in charge whenever it's valid.
+# - Does NOT create the imd-<hash> dir from scratch. If Plex has never
+#   prepared a driver yet (fresh install), there's nothing to repair and
+#   Plex' first transcode request will trigger the normal DriverDL flow.
+# - Does NOT delete or rename anything. Pure additive: copy bundled file
+#   into place if a slot is empty.
+# - Does NOT run if PLEX_VAAPI_REPAIR_DISABLE=true.
+#
+# Idempotent: re-running after a successful repair is a no-op.
+#
+# Trigger surface deliberately narrow: only matches the precise
+# dangling-symlink / empty-dir state. If Plex' downloaded driver is in
+# place but broken at runtime (e.g. relocation errors), this hook does
+# nothing — that's a separate failure class that should be solved by the
+# image's bundled libigdgmm 22.10.0 (PR #7).
+#
+
+set -eu
+
+LOG_PREFIX="[plex-vaapi-repair]"
+
+# Allow operator opt-out (e.g. to test a vendored driver from upstream Plex
+# without our bundled fallback kicking in).
+if [ "${PLEX_VAAPI_REPAIR_DISABLE:-}" = "true" ] || \
+   [ "${PLEX_VAAPI_REPAIR_DISABLE:-}" = "TRUE" ] || \
+   [ "${PLEX_VAAPI_REPAIR_DISABLE:-}" = "1" ]; then
+    echo "$LOG_PREFIX disabled via PLEX_VAAPI_REPAIR_DISABLE — skipping" >&2
+    exit 0
+fi
+
+if [ "${DEBUG:-}" = "true" ] || [ "${DEBUG:-}" = "TRUE" ]; then
+    set -x
+fi
+
+PLEX_DIR="/config/Library/Application Support/Plex Media Server"
+DRIVERS_DIR="$PLEX_DIR/Drivers"
+CACHE_DIR="$PLEX_DIR/Cache/va-dri-linux-x86_64"
+BUNDLED_DRIVER="/usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so"
+
+# Bail fast if /config isn't mounted yet or Plex has never started.
+# (Fresh container, first-boot — nothing to repair.)
+if [ ! -d "$DRIVERS_DIR" ]; then
+    echo "$LOG_PREFIX no Drivers/ dir yet (fresh Plex install?) — nothing to repair" >&2
+    exit 0
+fi
+
+if [ ! -f "$BUNDLED_DRIVER" ]; then
+    echo "$LOG_PREFIX bundled driver missing at $BUNDLED_DRIVER — image is malformed, abort" >&2
+    exit 0
+fi
+
+# Resolve the desired owner from the existing Drivers/ dir so we don't
+# stomp the PUID/PGID. Falls back to 1000:1000 (LSIO default) if stat fails.
+DRIVERS_UID=$(stat -c '%u' "$DRIVERS_DIR" 2>/dev/null || echo 1000)
+DRIVERS_GID=$(stat -c '%g' "$DRIVERS_DIR" 2>/dev/null || echo 1000)
+
+repair_count=0
+
+# Iterate every imd-*-linux-x86_64/dri/ slot Plex has prepared.
+# Multiple hash dirs can exist after Plex Server version bumps.
+for imd_dir in "$DRIVERS_DIR"/imd-*-linux-x86_64; do
+    # No-match (glob unexpanded) is fine — just skip.
+    [ -d "$imd_dir" ] || continue
+
+    target_dri="$imd_dir/dri"
+    target_file="$target_dri/iHD_drv_video.so"
+
+    # Slot is healthy if the file exists and is non-empty.
+    if [ -s "$target_file" ]; then
+        continue
+    fi
+
+    # Slot is broken: dri/ exists with no file OR an empty file.
+    # (We don't try to create the imd-*/dri/ structure from nothing —
+    # that's Plex' job on first transcode request.)
+    if [ ! -d "$target_dri" ]; then
+        echo "$LOG_PREFIX $imd_dir/dri/ doesn't exist — leaving for Plex to create" >&2
+        continue
+    fi
+
+    echo "$LOG_PREFIX repairing empty/missing driver in $target_dri" >&2
+    cp "$BUNDLED_DRIVER" "$target_file"
+    chown "$DRIVERS_UID:$DRIVERS_GID" "$target_file"
+    repair_count=$((repair_count + 1))
+done
+
+# Cache symlink hygiene: if it exists but points to a now-existing file
+# (because we just repaired it), great — leave it. If it points to a
+# non-existent file and the file wasn't repairable, log it; Plex will
+# still fail at next transcode but we don't have anything better to do.
+cache_link="$CACHE_DIR/iHD_drv_video.so"
+if [ -L "$cache_link" ] && [ ! -e "$cache_link" ]; then
+    echo "$LOG_PREFIX cache symlink $cache_link is dangling (target not found post-repair)" >&2
+fi
+
+if [ "$repair_count" -gt 0 ]; then
+    echo "$LOG_PREFIX repaired $repair_count VAAPI driver cache slot(s)" >&2
+else
+    echo "$LOG_PREFIX VAAPI driver cache OK — no repair needed" >&2
+fi
+
+exit 0

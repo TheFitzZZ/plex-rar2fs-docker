@@ -79,6 +79,19 @@ If you see the encoder flag and CPU usage stays moderate (~20–30 % per session
 
 For troubleshooting (driver load issues, Plex' runtime DriverDL pipeline, musl/glibc symbol mismatches), the [merged PR history](https://github.com/TheFitzZZ/plex-rar2fs-docker/pulls?q=is%3Apr+is%3Amerged) documents the actual issues encountered and their fixes — each PR description carries the diagnostic notes that led to it.
 
+### VAAPI cache self-repair
+
+Plex' runtime DriverDL pipeline (>= 1.43.x) downloads its own iHD driver to `/config/Library/Application Support/Plex Media Server/Drivers/imd-<hash>-linux-x86_64/dri/` and points the Transcoder subprocess at it via an injected `LIBVA_DRIVERS_PATH` override. If that cache file ever ends up empty or missing (manual cleanup, partial download, fs corruption), **Plex does NOT re-download on next transcode** — it just fails every HW session with `Failed to set value 'vaapi=...' for option 'init_hw_device': I/O error`.
+
+To protect against this failure mode, the image ships a `cont-init.d` hook (`40-plex-vaapi-cache-repair`) that:
+
+- Runs at every container start
+- Scans every existing `Drivers/imd-*-linux-x86_64/dri/` slot
+- Restores any empty / missing `iHD_drv_video.so` from the bundled musl-clean driver at `/usr/lib/plexmediaserver/lib/dri/iHD_drv_video.so`
+- Is fully idempotent and additive — never deletes, never touches a healthy cache
+
+Disable with `-e PLEX_VAAPI_REPAIR_DISABLE=true` if you want to bisect a Plex-side DriverDL issue without the safety net.
+
 ---
 
 ## Acknowledgments

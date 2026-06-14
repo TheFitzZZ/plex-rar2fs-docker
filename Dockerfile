@@ -129,7 +129,9 @@ RUN set -eux; \
     \
     mkdir /data-unrar
 
-COPY rar2fs-assets/30-rar2fs-mount /etc/cont-init.d/
+COPY rar2fs-assets/30-rar2fs-mount             /etc/cont-init.d/
+COPY rar2fs-assets/40-plex-vaapi-cache-repair  /etc/cont-init.d/
+RUN chmod +x /etc/cont-init.d/30-rar2fs-mount /etc/cont-init.d/40-plex-vaapi-cache-repair
 
 VOLUME /config
 VOLUME /data
