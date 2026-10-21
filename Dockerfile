@@ -88,8 +88,10 @@ ENV LIBVA_DRIVERS_PATH=/usr/lib/plexmediaserver/lib/dri \
 
 # Single RUN layer: build deps -> patch RPATHs -> build rar2fs -> cleanup.
 RUN set -eux; \
-    BUILD_DEPS="libfuse-dev autoconf automake autopoint build-essential git wget ca-certificates patchelf"; \
-    RUNTIME_DEPS="fuse libfuse2t64"; \
+    BUILD_DEPS="libfuse-dev autoconf automake autopoint build-essential git wget patchelf"; \
+    # ca-certificates must survive the purge below: pms-docker's cont-init scripts
+    # curl plex.tv over HTTPS (40-plex-first-run for PLEX_CLAIM, 50-plex-update).
+    RUNTIME_DEPS="fuse libfuse2t64 ca-certificates"; \
     apt-get update; \
     apt-get install -y --no-install-recommends $BUILD_DEPS $RUNTIME_DEPS; \
     \
